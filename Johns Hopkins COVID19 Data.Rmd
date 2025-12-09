@@ -1,0 +1,238 @@
+---
+title: "Johns Hopkins COVID-19 Data"
+output: pdf_document
+date: "2025-12-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+This document will cover the import of Johns Hopkins COVID-19 data from https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series.
+
+```{r setup_libs}
+# Set up required libraries
+library(tidyverse)
+library(lubridate)
+```
+
+## Question of Interest
+
+Can the COVID-19 data compiled by Johns Hopkins allow us to assess the overall impact of COVID-19 based on geographical area? Can the data be utilized to make retroactive predictions about COVID-19 deaths based on rates in particular geographical areas?
+
+## Get the Data
+
+```{r get_covid_data}
+# Get the Johns Hopkins COVID-19 data URL
+covid_url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+covid_file_names <- c("time_series_covid19_confirmed_global.csv",
+                      "time_series_covid19_deaths_global.csv",
+                      "time_series_covid19_confirmed_US.csv",
+                      "time_series_covid19_deaths_US.csv")
+covid_urls <- str_c(covid_url_in, covid_file_names)
+```
+
+```{r import_data, message=FALSE}
+# Import the COVID-19 data
+covid_global_cases <- read_csv(covid_urls[1])
+covid_global_deaths <- read_csv(covid_urls[2])
+covid_US_cases <- read_csv(covid_urls[3])
+covid_US_deaths <- read_csv(covid_urls[4])
+```
+
+## Tidy the Data
+
+```{r data_tidy}
+# Remove unnecessary latitude/longitude data; clean-up country and state data; consolidate case data
+covid_global_cases <- covid_global_cases %>% 
+  rename (Province_State = `Province/State`, Country_Region = `Country/Region`) %>%
+  pivot_longer(cols = matches("^\\d{1,2}/\\d{1,2}/\\d{2}$"), names_to = "date", values_to = "cases") %>% 
+  mutate(date = mdy(date)) %>% 
+  select(-c(Lat,Long))
+covid_global_deaths <- covid_global_deaths %>% 
+  rename (Province_State = `Province/State`, Country_Region = `Country/Region`) %>%
+  pivot_longer(cols = matches("^\\d{1,2}/\\d{1,2}/\\d{2}$"), names_to = "date", values_to = "deaths") %>% 
+  mutate(date = mdy(date)) %>% 
+  select(-c(Lat,Long))
+covid_US_cases <- covid_US_cases %>% 
+  rename (Long = Long_) %>% 
+  pivot_longer(cols = matches("^\\d{1,2}/\\d{1,2}/\\d{2}$"), names_to = "date", values_to = "cases") %>% 
+  select(Admin2:cases) %>% 
+  mutate(date = mdy(date)) %>% 
+  select(-c(Lat,Long))
+covid_US_deaths <- covid_US_deaths %>% 
+  rename (Long = Long_) %>% 
+  pivot_longer(cols = matches("^\\d{1,2}/\\d{1,2}/\\d{2}$"), names_to = "date", values_to = "deaths") %>% 
+  select(Admin2:deaths) %>% 
+  mutate(date = mdy(date)) %>% 
+  select(-c(Lat,Long))
+
+```
+
+## Transform the Data
+
+```{r data_transform}
+# Combine the cases and deaths per date 
+covid_global <- covid_global_cases %>% 
+  full_join(covid_global_deaths, by = c("Country_Region", "Province_State", "date"))
+covid_US <- covid_US_cases %>% 
+  full_join(covid_US_deaths, by = c("Admin2", "Province_State", "Country_Region", "Combined_Key", "date"))
+# Filter out rows with no cases
+covid_global <- covid_global %>% 
+  filter(cases > 0)
+covid_US <- covid_US %>% 
+  filter(cases > 0)
+# Add Combined_Key to the global data set
+covid_global <- covid_global %>% 
+  unite("Combined_Key", c(Province_State, Country_Region), sep = ", ", na.rm = TRUE, remove = FALSE)
+# Add population to the global data set
+pop_lookup_table <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+pop_lookup <- read_csv(pop_lookup_table) %>% 
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+covid_global <- covid_global %>% 
+  left_join(pop_lookup, by = c("Province_State", "Country_Region")) %>% 
+  select(-c(UID, FIPS)) %>% 
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+```
+
+## Data Summary
+
+```{r data_summary}
+# Show a summary of the data
+summary(covid_global)
+summary(covid_US)
+```
+
+## Data Visualization/Analysis
+
+### COVID-19 Cases and Deaths Over Time in the United States
+
+```{r us_covid_timeline}
+# Show a timeline of US cases and deaths 2020-2023 [data end date]
+US_by_state <- covid_US %>% 
+  group_by(Province_State, Country_Region, date) %>% 
+  summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths *1000000 / Population) %>% 
+  select(Province_State, Country_Region, date, cases, deaths, deaths_per_mill, Population) %>% 
+  ungroup()
+US_totals <- US_by_state %>% 
+  group_by(Country_Region, date) %>% 
+  summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths *1000000 / Population) %>% 
+  ungroup()
+US_totals %>% 
+  filter(cases > 0) %>% 
+  ggplot(aes(x = date, y = cases)) + geom_line(aes(color = "cases")) + geom_point(aes(color = "cases")) + geom_line(aes(y = deaths, color = "deaths")) + geom_point(aes(y = deaths, color = "deaths")) + scale_y_log10() + theme(legend.position="bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 in US", y = NULL)
+# Create US_state_totals for later use
+US_state_totals <- US_by_state %>% 
+  group_by(Province_State) %>% 
+  summarize(cases = max(cases), deaths = max(deaths), Population = max(Population), cases_per_thou = 1000 * cases / Population, deaths_per_thou = 1000 * deaths / Population, .groups = "drop") %>% 
+  filter(cases > 0, Population > 0)
+```
+
+### COVID-19 Cases and Deaths Over Time in Arizona
+
+```{r az_covid_timeline}
+# Show a timeline of Arizona cases and deaths 2020-2023 [data end date]
+state <- "Arizona"
+US_by_state %>% 
+  filter(Province_State == state) %>% 
+  filter(cases > 0) %>% 
+  ggplot(aes(x = date, y = cases)) + geom_line(aes(color = "cases")) + geom_point(aes(color = "cases")) + geom_line(aes(y = deaths, color = "deaths")) + geom_point(aes(y = deaths, color = "deaths")) + scale_y_log10() + theme(legend.position="bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 in Arizona", y = NULL)
+```
+
+### Did the COVID-19 rates level off over time?
+
+```{r check_timelines}
+# Determine whether COVID-19 rates leveled off over time in the US as the previous plot appeared to indicate
+max(US_totals$date)
+max(US_totals$deaths)
+US_totals <- US_totals %>% 
+  mutate(new_cases = cases - lag(cases), new_deaths = deaths - lag(deaths))
+US_totals %>% 
+  ggplot(aes(x = date, y = new_cases)) + geom_line(aes(color = "new_cases")) + geom_point(aes(color = "new_cases")) + geom_line(aes(y = new_deaths, color = "new_deaths")) + geom_point(aes(y = new_deaths, color = "new_deaths")) + scale_y_log10() + theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 Rates in US", y = NULL)
+
+# Determine whether COVID-19 rates leveled off over time in Arizona as the previous plot appeared to indicate
+US_by_state <- US_by_state %>% 
+  mutate(new_cases = cases - lag(cases), new_deaths = deaths - lag(deaths))
+state <- "Arizona"
+US_by_state %>% 
+  filter(Province_State == state) %>% 
+  ggplot(aes(x = date, y = new_cases)) + geom_line(aes(color = "new_cases")) + geom_point(aes(color = "new_cases")) + geom_line(aes(y = new_deaths, color = "new_deaths")) + geom_point(aes(y = new_deaths, color = "new_deaths")) + scale_y_log10() + theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 Rates in Arizona", y = NULL)
+```
+
+### Which states were the most and least impacted by COVID-19?
+
+```{r check_impact}
+# Determine states with the least deaths per thousand people
+US_state_totals %>% 
+  slice_min(deaths_per_thou, n = 10)
+
+# Determine states with the greatest deaths per thousand people
+US_state_totals %>% 
+  slice_max(deaths_per_thou, n = 10)
+```
+
+### Top 10 States by Total Cases
+```{r top_states_plot}
+# Compile chart of top 10 states with the highest COVID-19 case count
+US_state_totals %>% 
+  slice_max(cases, n=10) %>% 
+  ggplot(aes(x = reorder(Province_State, cases), y = cases)) + geom_col(fill = "purple") + coord_flip() + labs(title = "Top 10 States by Total COVID-19 Cases", x = "State", y = "Total Cases")
+```
+
+### Cases vs. Deaths By State
+```{r cases_v_deaths}
+# Scatterplot showing cases and deaths. Each point represents one of the US states.
+US_state_totals %>% 
+  mutate(label = if_else(cases > 7000000 | deaths > 75000, Province_State, "")) %>%
+  ggplot(aes(x = cases, y = deaths)) + geom_point(color = "orange") + geom_text(aes(label = label), vjust = -0.5, size = 3) + labs(title = "Total Cases vs. Total Deaths by State", x = "Total Cases", y = "Total Deaths")
+```
+
+
+## Modeling
+
+### Can we predict the deaths based on the cases per thousand?
+```{r data_prediction}
+# Chart the cases and deaths per thousand and compare with a prediction
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = US_state_totals)
+summary(mod)
+US_state_totals %>% 
+  slice_min(cases_per_thou)
+US_state_totals %>% 
+  slice_max(cases_per_thou)
+x_grid <- seq(100,500)
+new_df <- tibble(cases_per_thou = x_grid)
+US_state_totals %>% 
+  mutate(pred = predict(mod))
+US_total_w_pred <- US_state_totals %>% 
+  mutate(pred = predict(mod))
+US_total_w_pred %>% 
+  ggplot() + geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") + geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+```
+
+### Can the population of a U.S. state be used to predict the death rates?
+```{r pop_death_prediction}
+# Determining correlation between population and death rate
+pop_death <- lm(deaths_per_thou ~ Population, data = US_state_totals)
+summary(pop_death)
+# Based on the large p-value, there is no statistical evidence that population size and death rate are correlated
+# Plot death rate vs. population
+US_state_totals %>% 
+  ggplot(aes(x = Population, y = deaths_per_thou)) + geom_point(color = "green") + geom_smooth(method = "lm", se = FALSE, color = "black") + labs(title = "Deaths per Thousand vs. State Population", x = "Population", y = "Deaths per Thousand")
+```
+
+## Bias
+
+### What are potential bias sources for this analysis?
+
+One potential bias in this analysis could originate from the reporting differences across different regions (globally) as well as different states (in the U.S.). Since some states may have been more thorough than others, this could lead to discrepancies in the data that is being analyzed.
+Another bias that also originates from location is the availability of testing. If individuals did not have COVID-19 testing facilities easily accessible in their area, there may be an inaccurate count of cases for that area.
+There is a potential bias as well in conclusions that can be drawn from this data due to the variables that are available. Additional variables such as age and vaccination status of the individuals could allow us to make better predictions.
+Finally, data scientist inherent bias also needs to be taken into consideration. For example, I live in Arizona and so focused on assessing the Arizona COVID-19 data during part of this analysis, whereas a student in a different state may choose to perform a different analysis. 
+
+## Conclusion
+
+The Johns Hopkins COVID-19 data does allow data scientists some ability to assess the impact of COVID-19 across geographical areas. This analysis capability was further expanded by incorporating global population data as also published by Johns Hopkins. While the attempted model in this analysis (predicting deaths based on population size) did not result in a finding of statistical significance, there is a wealth of information available in this dataset for future analysis.
