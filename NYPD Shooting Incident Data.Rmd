@@ -1,0 +1,152 @@
+---
+title: "NYPD Shooting Incident Data"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-12-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+This document will cover the import of NYPD shooting incident data from https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD
+
+```{r setup_libs}
+# Set up required libraries
+library(tidyverse)
+library(lubridate)
+```
+
+## Get the Data
+
+```{r get_nypd_data}
+# Get the NYPD shooting incident data URL
+nypd_url_in <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+```
+
+```{r import_data, message=FALSE}
+# Import the NYPD shooting incident data
+nypd_data <- read_csv(nypd_url_in)
+```
+
+## Tidy the Data
+
+```{r date_parsing}
+# Fix the date/time stamps; create new fields for year and hour
+nypd_data <- nypd_data %>% 
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE),
+         OCCUR_TIME = hms::as_hms(OCCUR_TIME),
+         year = year(OCCUR_DATE),
+         hour = lubridate::hour(OCCUR_TIME))
+```
+
+```{r column_cleanup}
+# Remove non-needed columns for X_COORD_CD, Y_COORD_CD, Latitude, Longitude, Lon_Lat
+nypd_data <- nypd_data %>%
+  select(-c(X_COORD_CD, Y_COORD_CD, Latitude, Longitude, Lon_Lat))
+```
+
+## Data Summary
+
+```{r data_summary}
+# Show a summary of the data
+summary(nypd_data)
+```
+
+## Data Visualization/Analysis
+
+### What times do shooting incidents occur?
+
+```{r hour_summary}
+# Hour of the day that is the riskiest
+plot_hour <- nypd_data %>%
+  count(hour) %>%
+  ggplot(aes(hour, n)) + geom_col() + labs(x="Hour", y="Incidents")
+print(plot_hour)
+```
+
+### What days do shooting incidents occur?
+
+```{r day_summary}
+# Day of the week that is the riskiest
+plot_day <- nypd_data %>%
+  mutate(dow = wday(OCCUR_DATE, label=TRUE)) %>%
+  count(dow) %>% ggplot(aes(dow, n)) + geom_col()
+print(plot_day)
+```
+
+### Additional Questions from these Results
+ - Why are shooting incidents more prevalent in evening hours?
+ - Why do the majority of shooting incidents occur at 11 pm?
+ - Why do the majority of incidents occur on a Sunday?
+
+## Modeling
+
+### What are the most prevalent victim and perpetrator races? How are victim and perpetrator races related in this data set?
+
+```{r race_model}
+race_standardize <- function(x) {
+  case_when(
+    x %in% c("BLACK") ~ "Black",
+    x %in% c("WHITE") ~ "White",
+    x %in% c("ASIAN / PACIFIC ISLANDER") ~ "Asian",
+    x %in% c("AMERICAN INDIAN/ALASKAN NATIVE") ~ "Native",
+    x %in% c("BLACK HISPANIC", "WHITE HISPANIC") ~ "Hispanic",
+    is.na(x) | x %in% c("UNKNOWN", "(null)", "") ~ "Unknown",
+    TRUE ~ "Unknown"
+  )
+}
+
+victim_rate <- nypd_data %>% 
+  mutate(vic_race2 = race_standardize(VIC_RACE)) %>%
+  count(vic_race2, name = "n") %>%
+  mutate(vic_race_per_thou = 1000 * n / sum(n)) %>%
+  arrange(desc(vic_race_per_thou))
+
+victim_rate
+  
+
+perp_rate <- nypd_data %>% 
+  mutate(perp_race2 = race_standardize(PERP_RACE)) %>%
+  count(perp_race2, name = "n") %>%
+  mutate(perp_race_per_thou = 1000 * n / sum(n)) %>%
+  arrange(desc(perp_race_per_thou))
+
+perp_rate
+
+perp_given_victim <- nypd_data %>%
+  mutate(vic_race2 = race_standardize(VIC_RACE), perp_race2 = race_standardize(PERP_RACE)) %>%
+  filter(vic_race2 != "Unknown", perp_race2 != "Unknown") %>%
+  count(vic_race2, perp_race2, name="n") %>%
+  complete(vic_race2, perp_race2, fill = list(n=0)) %>%
+  group_by(vic_race2) %>%
+  mutate(p = (n+1) / (sum(n) + n_distinct(perp_race2))) %>%
+  ungroup()
+
+most_common_perp_given_victim <- function(victim_race) {
+  perp_given_victim %>%
+    filter(vic_race2 == victim_race) %>%
+    arrange(desc(p)) %>%
+    slice(1) %>%
+    pull(perp_race2)
+}
+
+most_common_perp_given_victim("Black")
+most_common_perp_given_victim("Hispanic")
+most_common_perp_given_victim("White")
+most_common_perp_given_victim("Asian")
+most_common_perp_given_victim("Native")
+
+```
+
+## Bias
+
+### What are potential bias sources for this analysis?
+
+Many of the lines in the data set have an Unknown value for either perpetrator race or victim race. When these were dropped from the analysis, this biased the results.
+Another source of bias is the prevalence of victim and perpetrator rates per 1000. Since we do not include census data in this analysis, we do not know the rates of race prevalence in the cities where these incidents occurred. 
+Finally, the prediction mechanism for determining the likely perpetrator given the victim's race is based on past reported incidents and should not be used for future NYPD profiling. 
+One area of potential personal bias is in the questions that were asked around days/times of incidents (I would expect from watching the news that most incidents would occur on the weekend in evening hours) as well as the question around documented races of victims and perpetrators. Although there was no way to directly mitigate these in the code, I believe the acknowledgment in the Bias section is sufficient to document these potential areas of bias. 
